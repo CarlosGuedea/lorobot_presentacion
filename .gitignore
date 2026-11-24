@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+.superpowers/
+LorBot_API_y_firmware/
+LorBot_API_y_firmware.zip
+firmware/**/wifi_config.h
