@@ -2,6 +2,7 @@
  * DHT22 DATA -> GPIO32 (pull-up 10 kOhm a 3V3 si hace falta).
  * INMP441: SCK->26, WS->25, SD->33, L/R->GND, VDD->3V3 (microphone.h).
  * Wi-Fi y backend se configuran en wifi_config.h. GPIO2 a 3V3 registra la foto.
+ * TFT ST7735: SCK->18, SDA/MOSI->23, A0/DC->16, CS->5, RESET->17, LED->3V3.
  * GET /readings entrega la ultima muestra.
  * Monitor serie y carga: 115200. Audio I2S en dBFS; no es dB SPL calibrado.
  */
@@ -10,6 +11,8 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7735.h>
 #include <RobotLoroButton.h>
 #include <soc/gpio_struct.h>
 #include "microphone.h"
@@ -17,10 +20,62 @@
 
 constexpr uint8_t PIN_DHT = 32;
 constexpr uint8_t PIN_BUTTON = 2;
+constexpr uint8_t PIN_TFT_CS = 5;
+constexpr uint8_t PIN_TFT_DC = 16;
+constexpr uint8_t PIN_TFT_RST = 17;
 constexpr uint32_t INTERVALO_REPORTE_MS = 2500;
 constexpr char HOSTNAME[] = "esp32sensores";
 DHT dht(PIN_DHT, DHT22);
 WebServer server(80);
+Adafruit_ST7735 display(PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_RST);
+constexpr uint16_t COLOR_EYES = 0x3DFF;
+constexpr uint16_t COLOR_GOOD = 0x07E0;
+constexpr uint16_t COLOR_BAD = 0xF800;
+constexpr uint32_t DISPLAY_RESULT_MS = 10000;
+uint32_t resultadoPantallaMs = 0;
+bool mostrandoResultado = false;
+
+void drawEyes() {
+  display.fillScreen(ST77XX_BLACK);
+  for (uint8_t eye = 0; eye < 2; ++eye) {
+    const int16_t centerX = eye == 0 ? 52 : 108;
+    display.fillCircle(centerX, 64, 24, COLOR_EYES);
+    display.fillCircle(centerX + 3, 64, 10, ST77XX_BLACK);
+    display.fillCircle(centerX + 7, 60, 4, ST77XX_WHITE);
+  }
+}
+
+void drawHeart() {
+  display.fillScreen(ST77XX_BLACK);
+  display.fillCircle(66, 53, 18, COLOR_GOOD);
+  display.fillCircle(94, 53, 18, COLOR_GOOD);
+  display.fillTriangle(48, 61, 112, 61, 80, 96, COLOR_GOOD);
+}
+
+void drawCross() {
+  display.fillScreen(ST77XX_BLACK);
+  for (int8_t offset = -4; offset <= 4; ++offset) {
+    display.drawLine(56 + offset, 40, 104 + offset, 88, COLOR_BAD);
+    display.drawLine(104 + offset, 40, 56 + offset, 88, COLOR_BAD);
+  }
+}
+
+void updateDisplay() {
+  const String body = server.arg("plain");
+  if (body == "{\"state\":\"good\"}") {
+    drawHeart();
+    mostrandoResultado = true;
+    resultadoPantallaMs = millis();
+  } else if (body == "{\"state\":\"bad\"}") {
+    drawCross();
+    mostrandoResultado = true;
+    resultadoPantallaMs = millis();
+  } else {
+    server.send(400, "application/json", "{\"error\":\"Estado de pantalla invalido\"}");
+    return;
+  }
+  server.send(200, "application/json", "{\"ok\":true}");
+}
 
 uint32_t ultimoReporteMs = 0;
 uint32_t muestraMs = 0;
@@ -132,6 +187,9 @@ void handleButton() {
 
 void setup() {
   Serial.begin(115200);
+  display.initR(INITR_BLACKTAB);
+  display.setRotation(1);
+  drawEyes();
   if (!beginMicrophone()) Serial.println("INMP441: fallo de inicializacion I2S.");
   dht.begin();
   ultimoReporteMs = millis();
@@ -147,6 +205,7 @@ void setup() {
   buttonClient.begin("sensors", BACKEND_HOST, BACKEND_PORT);
   server.on("/", HTTP_GET, sendReadings);
   server.on("/readings", HTTP_GET, sendReadings);
+  server.on("/display", HTTP_POST, updateDisplay);
   server.onNotFound([]() { server.send(404, "application/json", "{\"error\":\"Ruta no encontrada\"}"); });
   Serial.println("Proyecto Loro: ESP32 de sensores, DHT22 GPIO32 e INMP441 I2S");
   Serial.printf("Conectando a %s. Primera muestra en 2.5 segundos.\n", WIFI_SSID);
@@ -154,6 +213,10 @@ void setup() {
 
 void loop() {
   const uint32_t ahora = millis();
+  if (mostrandoResultado && (uint32_t)(ahora - resultadoPantallaMs) >= DISPLAY_RESULT_MS) {
+    drawEyes();
+    mostrandoResultado = false;
+  }
   if ((uint32_t)(ahora - ultimoReporteMs) >= INTERVALO_REPORTE_MS) {
     ultimoReporteMs = ahora;
     humedad = dht.readHumidity();

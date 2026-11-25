@@ -52,14 +52,15 @@ Si I²S falla, la señal es constante o deja de llegar, las métricas se publica
 
 ## Arduino IDE y Wi-Fi
 
-1. Instala **esp32 by Espressif Systems** y **DHT sensor library by Adafruit**, con sus dependencias.
+1. Instala **esp32 by Espressif Systems**, **DHT sensor library by Adafruit**, **Adafruit GFX Library** y **Adafruit ST7735 and ST7789 Library**, con sus dependencias.
 2. Abre `esp32_sensores.ino` manteniendo los archivos `.h` y `.cpp` en la misma carpeta.
 3. Selecciona **ESP32 Dev Module**, el puerto correcto y carga a **115200**. El monitor serie también usa 115200.
 4. Ejecuta `python3 firmware/configure_wifi.py` desde la raíz para generar `wifi_config.h` local en las placas; usa `TU_RED_WIFI`, introduce la clave Wi-Fi y configura el host mDNS o IP de la Mac. Para LorBot_API, indica el puerto **5055**. Los archivos locales están ignorados por Git.
-5. El botón GPIO2 usa `INPUT_PULLDOWN` y se conecta entre GPIO2 y 3V3. Una pulsación debounced registra una foto para la ESP32-CAM; la placa continúa publicando JSON en `/readings` y `/` como antes.
-6. Desde la carpeta LorBot_API ejecuta `./Iniciar.command`. Si mDNS falla, configura la IP de la Mac como `BACKEND_HOST` y `http://<IP-de-la-placa>` como `LORBOT_SENSORS_URL`.
+5. El botón GPIO2 usa `INPUT_PULLDOWN` y se conecta entre GPIO2 y 3V3. Una pulsación debounced pide una foto a la ESP32-CAM; al recibirla, LorBot_API la clasifica automáticamente con los sensores y actualiza la TFT. La placa continúa publicando JSON en `/readings` y `/` como antes.
+6. TFT ST7735 de 128×160: `SCK -> GPIO18`, `SDA -> GPIO23`, `A0 -> GPIO16`, `CS -> GPIO5`, `Reset -> GPIO17`, `LED -> 3V3`, `VCC -> 3V3`, `GND -> GND`. La pantalla se usa horizontal; muestra ojos azules al encender, corazón verde por 10 segundos si el lugar es apto y X roja por 10 segundos si no lo es, y después vuelve a los ojos.
+7. Desde la carpeta LorBot_API ejecuta `./Iniciar.command`. Si mDNS falla, configura la IP de la Mac como `BACKEND_HOST` y `http://<IP-de-la-placa>` como `LORBOT_SENSORS_URL`.
 
-Verificado compilando con Arduino-ESP32 **2.0.17**, usando el controlador I²S legacy incluido. Con L/R a GND, el firmware recibe el canal izquierdo; la compatibilidad de otras versiones debe comprobarse antes de migrar el paquete.
+El firmware base de sensores se verificó previamente con Arduino-ESP32 **2.0.17**, usando el controlador I²S legacy incluido. La integración nueva de pantalla requiere las librerías Adafruit indicadas arriba y aún necesita compilarse y probarse con el módulo conectado. Con L/R a GND, el firmware recibe el canal izquierdo; la compatibilidad de otras versiones debe comprobarse antes de migrar el paquete.
 
 ## Pruebas del cálculo
 

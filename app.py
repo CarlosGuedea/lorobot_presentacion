@@ -96,6 +96,7 @@ def create_app():
         raise ValueError("LORBOT_SENSORS_URL debe ser una dirección base HTTP, por ejemplo http://192.168.1.50")
 
     capture_lock = threading.Lock()
+    prediction_lock = threading.Lock()
     capture_events = {}
     active_event_id = None
     latest_photo = None
@@ -132,6 +133,60 @@ def create_app():
         if not isinstance(age, int) or isinstance(age, bool) or age < 0 or age > 5000:
             raise ValueError("La lectura del ESP32 de sensores está vencida.")
         return reading
+
+    def update_sensor_display(state):
+        body = json.dumps({"state": state}, separators=(",", ":")).encode()
+        req = Request(sensor_url + "/display", data=body,
+                      headers={"Content-Type": "application/json"}, method="POST")
+        with build_opener(ProxyHandler({})).open(req, timeout=0.5) as response:
+            if response.status != 200:
+                raise OSError(f"La pantalla ESP32 respondió HTTP {response.status}.")
+
+    def classify_image(image):
+        reading = None
+        for attempt in range(3):
+            try:
+                reading = read_sensor_reading()
+                break
+            except (HTTPError, URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError):
+                if attempt == 2:
+                    return {"error": "Se necesita una lectura reciente del ESP32 de sensores."}, 503
+                time.sleep(0.25)
+        temperature = finite_number(reading.get("temperature_c"), -40, 80)
+        noise = finite_number(reading.get("sound_dbfs"), -120, 1)
+        if (reading.get("dht_ok") is not True or reading.get("sound_ok") is not True
+                or temperature is None or noise is None):
+            return {"error": "Se necesitan lecturas válidas del DHT22 y del INMP441."}, 503
+
+        with prediction_lock:
+            prediction = model.predict(image, temperature, noise)
+        display_state = {"Apto": "good", "No apto": "bad"}.get(prediction)
+        if display_state:
+            try:
+                update_sensor_display(display_state)
+            except (HTTPError, URLError, TimeoutError, OSError):
+                app.logger.warning("No se pudo actualizar la pantalla del ESP32 de sensores.")
+        return {"prediction": prediction, "temperature_c": temperature,
+                "sound_dbfs": noise,
+                "humidity_pct": finite_number(reading.get("humidity_pct"), 0, 100)}, 200
+
+    def classify_captured_photo(event_id, data):
+        try:
+            with Image.open(BytesIO(data)) as source:
+                image = ImageOps.exif_transpose(source).convert("RGB")
+            result, status = classify_image(image)
+        except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError):
+            result, status = {"error": "La foto JPEG no se pudo procesar."}, 400
+        except Exception:
+            app.logger.exception("Falló la clasificación automática de la captura %s.", event_id)
+            result, status = {"error": "No se pudo completar la clasificación automática."}, 500
+        with capture_lock:
+            event = capture_events.get(event_id)
+            if event:
+                event["classification"] = {
+                    "status": "complete" if status == 200 else "failed",
+                    **result,
+                }
 
     @app.get("/health")
     def health():
@@ -198,6 +253,7 @@ def create_app():
                 "camera_key": None,
                 "created_at": now,
                 "photo": None,
+                "classification": {"status": "waiting_photo"},
             }
             active_event_id = event_id
         return jsonify(event_id=event_id), 200
@@ -242,10 +298,13 @@ def create_app():
             event["photo"] = data
             event["camera_key"] = camera_key
             event["created_at"] = now
+            event["classification"] = {"status": "processing"}
             latest_photo, latest_photo_id = data, event_id
             if active_event_id == event_id:
                 active_event_id = None
             prune_events(now)
+        threading.Thread(target=classify_captured_photo, args=(event_id, data),
+                         name=f"classify-{event_id[:8]}", daemon=True).start()
         return jsonify(saved=True, event_id=event_id), 201
 
     @app.get("/api/button-events/<event_id>/photo")
@@ -264,6 +323,19 @@ def create_app():
         response.headers["X-Capture-Id"] = event_id
         response.headers["Cache-Control"] = "no-store"
         return response
+
+    @app.get("/api/button-events/<event_id>/classification")
+    def get_event_classification(event_id):
+        if not EVENT_ID_RE.fullmatch(event_id):
+            return jsonify(error="El identificador de evento no es válido."), 404
+        with capture_lock:
+            prune_events(time.monotonic())
+            event = capture_events.get(event_id)
+            if not event:
+                return jsonify(error="La solicitud de foto venció o no existe."), 410
+            classification = event["classification"]
+        status = 202 if classification["status"] in ("waiting_photo", "processing") else 200
+        return jsonify(classification), status
 
     @app.get("/api/latest-photo")
     def get_latest_photo():
@@ -295,19 +367,8 @@ def create_app():
         except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError):
             return jsonify(error="Envía una imagen válida, por ejemplo JPG o PNG."), 400
 
-        try:
-            reading = read_sensor_reading()
-        except (HTTPError, URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError):
-            return jsonify(error="Se necesita una lectura reciente del ESP32 de sensores."), 503
-        temperature = finite_number(reading.get("temperature_c"), -40, 80)
-        noise = finite_number(reading.get("sound_dbfs"), -120, 1)
-        if (reading.get("dht_ok") is not True or reading.get("sound_ok") is not True
-                or temperature is None or noise is None):
-            return jsonify(error="Se necesitan lecturas válidas del DHT22 y del INMP441."), 503
-
-        prediction = model.predict(image, temperature, noise)
-        return jsonify(prediction=prediction, temperature_c=temperature, sound_dbfs=noise,
-                       humidity_pct=finite_number(reading.get("humidity_pct"), 0, 100))
+        result, status = classify_image(image)
+        return jsonify(result), status
 
     return app
 
